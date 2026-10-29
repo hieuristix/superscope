@@ -1,0 +1,32 @@
+.cache/
+build/
+.DS_Store
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+bin/
+obj/
+
+# CMake
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Python stuff
+venv/
+.venv/
