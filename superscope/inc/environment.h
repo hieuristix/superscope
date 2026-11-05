@@ -9,5 +9,5 @@ struct Satellite {
 };
 
 struct World {
-  Image skybox;
+  Image skyEquirect;
 };

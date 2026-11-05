@@ -1,0 +1,12 @@
+[submodule "ext/glm"]
+	path = ext/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "ext/stb"]
+	path = ext/stb
+	url = https://github.com/nothings/stb.git
+[submodule "ext/spdlog"]
+	path = ext/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "ext/tinyexr"]
+	path = ext/tinyexr
+	url = https://github.com/syoyo/tinyexr.git

@@ -1,0 +1,8 @@
+mode: direct
+width: 128
+height: 128
+position: 0.5, 0.5
+topLeft: 0.25, 0
+bottomRight: 0.75, 1
+exposure_time: 10
+elapsed_ms: 9.0355

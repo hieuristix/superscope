@@ -1,3 +1,8 @@
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define TINYEXR_USE_MINIZ 0
+#define TINYEXR_USE_STB_ZLIB 1
+#define TINYEXR_IMPLEMENTATION
 #include "imaging.h"
 
 #include <algorithm>
@@ -5,6 +10,8 @@
 #include <numbers>
 #include <random>
 
+// this is for mapping grid to uniform point
+// on hemisphere, basically simulating fish-eye lens
 glm::vec2 shirley_chiu_mapping(const glm::vec2& uv) {
   float a = 2.0f * uv.x - 1.0f;
   float b = 2.0f * uv.y - 1.0f;
@@ -22,6 +29,7 @@ glm::vec2 shirley_chiu_mapping(const glm::vec2& uv) {
   return {r * std::cos(phi), r * std::sin(phi)};
 }
 
+// This fill
 void init_sensor(Sensor& sensor) {
   sensor.samples.resize(sensor.width * sensor.height);
   for (uint32_t i = 0; i < sensor.height; ++i) {
@@ -35,41 +43,166 @@ void init_sensor(Sensor& sensor) {
   }
 }
 
+glm::vec3 sample_image(const Image& image, const glm::vec2& uv) {
+  glm::vec2 wrapped = glm::fract(uv);
+  uint32_t sx =
+      std::min(static_cast<uint32_t>(wrapped.x * image.width), image.width - 1);
+  uint32_t sy = std::min(static_cast<uint32_t>(wrapped.y * image.height),
+                         image.height - 1);
+  size_t idx = (sy * image.width + sx) * 3;
+  return {static_cast<float>(image.buffer[idx]),
+          static_cast<float>(image.buffer[idx + 1]),
+          static_cast<float>(image.buffer[idx + 2])};
+}
+
+void direct_pixel_expose(glm::vec3& outColor,
+                         const glm::vec2& position,
+                         const Sample& sample,
+                         const Image& skybox,
+                         const float exposureTime) {
+  static thread_local std::mt19937 rng{std::random_device{}()};
+
+  // 1. parallel transport the sensor hemisphere location to position
+  // A hemisphere covers [-0.25, 0.25] in longitude and [-0.5, 0.5] in latitude
+  glm::vec2 sample_uv =
+      position + sample.position * glm::vec2{0.25f, 0.5f};
+
+  // 2. sample image buffer
+  glm::vec3 radiance = sample_image(skybox, sample_uv);
+
+  // 3. add noise depend on sensor sensitivity
+  glm::vec3 signal = radiance * sample.sensitivity * exposureTime * 2.5f;
+  std::normal_distribution<float> noise(0.0f,
+                                        1.0f - sample.sensitivity + 0.01f);
+  outColor = glm::clamp(signal + glm::vec3{noise(rng), noise(rng), noise(rng)},
+                        0.0f, 255.0f);
+}
+
+void raycast_pixel_expose(glm::vec3& outColor,
+                          const glm::vec2& position,
+                          const Sample& sample,
+                          const Image& skybox,
+                          float exposureTime) {
+  static thread_local std::mt19937 rng{std::random_device{}()};
+  std::uniform_real_distribution<float> dist(-0.002f, 0.002f);
+
+  uint32_t num_rays = std::max(1u, static_cast<uint32_t>(exposureTime * 16.0f));
+  glm::vec3 accum{0.0f};
+
+  for (uint32_t r = 0; r < num_rays; ++r) {
+    glm::vec2 disk = sample.position + glm::vec2{dist(rng), dist(rng)};
+    float r2 = glm::dot(disk, disk);
+    if (r2 > 1.0f) continue;
+    float cos_theta = std::sqrt(1.0f - r2);
+
+    glm::vec2 sample_uv = position + disk * glm::vec2{0.25f, 0.5f};
+    accum += sample_image(skybox, sample_uv) * cos_theta;
+  }
+
+  outColor = glm::clamp(
+      (accum / static_cast<float>(num_rays)) * exposureTime * 2.5f, 0.0f,
+      255.0f);
+}
+
 void expose(const glm::vec2& position,
             const Sensor& sensor,
             const Image& skybox,
             Image& image,
-            float exposure_time) {
+            const float exposureTime) {
   image.width = sensor.width;
   image.height = sensor.height;
-  image.buffer.resize(image.width * image.height);
-
-  std::mt19937 rng{std::random_device{}()};
+  image.buffer.resize(image.width * image.height * 3);
 
   for (uint32_t i = 0; i < sensor.height; ++i) {
     for (uint32_t j = 0; j < sensor.width; ++j) {
       const auto& sample = sensor.samples[i * sensor.width + j];
+      glm::vec3 val{0.0f};
+#ifdef SS_RAYCAST
+      raycast_pixel_expose(val, position, sample, skybox, exposureTime);
+#else
+      direct_pixel_expose(val, position, sample, skybox, exposureTime);
+#endif
 
-      // 1. parallel transport the sensor location to position
-      glm::vec2 sample_uv = glm::fract(position + sample.position);
-
-      // 2. sample image buffer
-      uint32_t sx = std::min(
-          static_cast<uint32_t>(sample_uv.x * skybox.width), skybox.width - 1);
-      uint32_t sy =
-          std::min(static_cast<uint32_t>(sample_uv.y * skybox.height),
-                   skybox.height - 1);
-      float radiance = skybox.buffer[sy * skybox.width + sx];
-
-      // 3. add noise depend on sensor sensitivity
-      float signal = radiance * sample.sensitivity * exposure_time;
-      std::normal_distribution<float> noise(0.0f,
-                                            1.0f - sample.sensitivity + 0.01f);
-      float val = std::clamp(signal + noise(rng), 0.0f, 255.0f);
-
-      // 4. store the final sample on image
-      image.buffer[i * image.width + j] = static_cast<uint8_t>(val);
+      size_t idx = (i * image.width + j) * 3;
+      image.buffer[idx] = static_cast<uint8_t>(val.r);
+      image.buffer[idx + 1] = static_cast<uint8_t>(val.g);
+      image.buffer[idx + 2] = static_cast<uint8_t>(val.b);
     }
   }
 }
 
+void capture(const glm::vec2& position,
+             const Sensor& sensor,
+             const Image& skybox,
+             Image& image,
+             float exposure_time,
+             ImageRequest& request) {
+  Image exposed;
+  expose(position, sensor, skybox, exposed, exposure_time);
+
+  // Sensor hemisphere covers [position - {0.25, 0.5}, position + {0.25, 0.5}]
+  glm::vec2 sensor_tl = position - glm::vec2{0.25f, 0.5f};
+  glm::vec2 sensor_br = position + glm::vec2{0.25f, 0.5f};
+  glm::vec2 span = sensor_br - sensor_tl;
+
+  glm::vec2 uv0 = glm::clamp((request.topLeft - sensor_tl) / span, 0.0f, 1.0f);
+  glm::vec2 uv1 =
+      glm::clamp((request.bottomRight - sensor_tl) / span, 0.0f, 1.0f);
+
+  uint32_t x0 = static_cast<uint32_t>(uv0.x * exposed.width);
+  uint32_t y0 = static_cast<uint32_t>(uv0.y * exposed.height);
+  uint32_t x1 = std::max(x0 + 1, static_cast<uint32_t>(uv1.x * exposed.width));
+  uint32_t y1 = std::max(y0 + 1, static_cast<uint32_t>(uv1.y * exposed.height));
+
+  image.width = x1 - x0;
+  image.height = y1 - y0;
+  image.buffer.resize(image.width * image.height * 3);
+
+  for (uint32_t y = 0; y < image.height; ++y) {
+    for (uint32_t x = 0; x < image.width; ++x) {
+      size_t src_idx = ((y0 + y) * exposed.width + (x0 + x)) * 3;
+      size_t dst_idx = (y * image.width + x) * 3;
+      image.buffer[dst_idx] = exposed.buffer[src_idx];
+      image.buffer[dst_idx + 1] = exposed.buffer[src_idx + 1];
+      image.buffer[dst_idx + 2] = exposed.buffer[src_idx + 2];
+    }
+  }
+}
+
+void load_image(const std::filesystem::path& path, Image& image) {
+  int w, h, c;
+  if (path.extension() == ".exr") {
+    float* rgba = nullptr;
+    const char* err = nullptr;
+    int ret = LoadEXR(&rgba, &w, &h, path.string().c_str(), &err);
+    SS_ASSERT(ret == TINYEXR_SUCCESS, "Failed to load EXR {}: {}",
+              path.string(), err ? err : "");
+    image.width = static_cast<uint32_t>(w);
+    image.height = static_cast<uint32_t>(h);
+    image.buffer.resize(static_cast<size_t>(w) * h * 3);
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+      for (size_t k = 0; k < 3; ++k) {
+        float v = std::pow(std::clamp(rgba[i * 4 + k], 0.0f, 1.0f), 1.0f / 2.2f);
+        image.buffer[i * 3 + k] = static_cast<uint8_t>(v * 255.0f);
+      }
+    }
+    free(rgba);
+    return;
+  }
+  uint8_t* data = stbi_load(path.string().c_str(), &w, &h, &c, 3);
+  SS_ASSERT(data != nullptr, "Failed to load image: {}", path.string());
+  image.width = static_cast<uint32_t>(w);
+  image.height = static_cast<uint32_t>(h);
+  image.buffer.assign(data, data + w * h * 3);
+  stbi_image_free(data);
+}
+
+void save_image(const std::filesystem::path& path, const Image& image) {
+  int ok = stbi_write_png(path.string().c_str(), image.width, image.height, 3,
+                          image.buffer.data(), image.width * 3);
+  SS_ASSERT(ok != 0, "Failed to save image: {}", path.string());
+}
+
+#ifdef SS_FEATURE_VULKAN
+// implement vulkan based ray casting here
+#endif
