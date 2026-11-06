@@ -27,7 +27,7 @@ int main() {
       .topLeft = center - glm::vec2{0.25f, 0.5f},
       .bottomRight = center + glm::vec2{0.25f, 0.5f},
   };
-  float exposure_time = 10.0f;
+  float exposure_time = 0.1f;
 
   auto t0 = std::chrono::high_resolution_clock::now();
   capture(center, sensor, skybox, out_img, exposure_time, request);

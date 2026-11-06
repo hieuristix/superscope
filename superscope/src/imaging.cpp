@@ -50,9 +50,7 @@ glm::vec3 sample_image(const Image& image, const glm::vec2& uv) {
   uint32_t sy = std::min(static_cast<uint32_t>(wrapped.y * image.height),
                          image.height - 1);
   size_t idx = (sy * image.width + sx) * 3;
-  return {static_cast<float>(image.buffer[idx]),
-          static_cast<float>(image.buffer[idx + 1]),
-          static_cast<float>(image.buffer[idx + 2])};
+  return {image.buffer[idx], image.buffer[idx + 1], image.buffer[idx + 2]};
 }
 
 void direct_pixel_expose(glm::vec3& outColor,
@@ -71,11 +69,11 @@ void direct_pixel_expose(glm::vec3& outColor,
   glm::vec3 radiance = sample_image(skybox, sample_uv);
 
   // 3. add noise depend on sensor sensitivity
-  glm::vec3 signal = radiance * sample.sensitivity * exposureTime * 2.5f;
-  std::normal_distribution<float> noise(0.0f,
-                                        1.0f - sample.sensitivity + 0.01f);
-  outColor = glm::clamp(signal + glm::vec3{noise(rng), noise(rng), noise(rng)},
-                        0.0f, 255.0f);
+  glm::vec3 signal = radiance * sample.sensitivity * exposureTime;
+  std::normal_distribution<float> noise(
+      0.0f, (1.0f - sample.sensitivity) * 0.005f);
+  outColor = glm::max(
+      signal + glm::vec3{noise(rng), noise(rng), noise(rng)}, 0.0f);
 }
 
 void raycast_pixel_expose(glm::vec3& outColor,
@@ -85,23 +83,27 @@ void raycast_pixel_expose(glm::vec3& outColor,
                           float exposureTime) {
   static thread_local std::mt19937 rng{std::random_device{}()};
   std::uniform_real_distribution<float> dist(-0.002f, 0.002f);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+
+  // Project pixel's hemisphere point onto the flat aperture disk (height = sqrt(1 - r^2))
+  float aperture_height =
+      std::sqrt(std::max(0.0f, 1.0f - glm::dot(sample.position, sample.position)));
 
   uint32_t num_rays = std::max(1u, static_cast<uint32_t>(exposureTime * 16.0f));
   glm::vec3 accum{0.0f};
 
   for (uint32_t r = 0; r < num_rays; ++r) {
+    // Ray only enters if it passes through the foreshortened aperture opening
+    if (unit(rng) > aperture_height) continue;
+
     glm::vec2 disk = sample.position + glm::vec2{dist(rng), dist(rng)};
-    float r2 = glm::dot(disk, disk);
-    if (r2 > 1.0f) continue;
-    float cos_theta = std::sqrt(1.0f - r2);
+    if (glm::dot(disk, disk) > 1.0f) continue;
 
     glm::vec2 sample_uv = position + disk * glm::vec2{0.25f, 0.5f};
-    accum += sample_image(skybox, sample_uv) * cos_theta;
+    accum += sample_image(skybox, sample_uv);
   }
 
-  outColor = glm::clamp(
-      (accum / static_cast<float>(num_rays)) * exposureTime * 2.5f, 0.0f,
-      255.0f);
+  outColor = (accum / static_cast<float>(num_rays)) * exposureTime;
 }
 
 void expose(const glm::vec2& position,
@@ -124,9 +126,9 @@ void expose(const glm::vec2& position,
 #endif
 
       size_t idx = (i * image.width + j) * 3;
-      image.buffer[idx] = static_cast<uint8_t>(val.r);
-      image.buffer[idx + 1] = static_cast<uint8_t>(val.g);
-      image.buffer[idx + 2] = static_cast<uint8_t>(val.b);
+      image.buffer[idx] = val.r;
+      image.buffer[idx + 1] = val.g;
+      image.buffer[idx + 2] = val.b;
     }
   }
 }
@@ -181,10 +183,9 @@ void load_image(const std::filesystem::path& path, Image& image) {
     image.height = static_cast<uint32_t>(h);
     image.buffer.resize(static_cast<size_t>(w) * h * 3);
     for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
-      for (size_t k = 0; k < 3; ++k) {
-        float v = std::pow(std::clamp(rgba[i * 4 + k], 0.0f, 1.0f), 1.0f / 2.2f);
-        image.buffer[i * 3 + k] = static_cast<uint8_t>(v * 255.0f);
-      }
+      image.buffer[i * 3 + 0] = rgba[i * 4 + 0];
+      image.buffer[i * 3 + 1] = rgba[i * 4 + 1];
+      image.buffer[i * 3 + 2] = rgba[i * 4 + 2];
     }
     free(rgba);
     return;
@@ -193,13 +194,35 @@ void load_image(const std::filesystem::path& path, Image& image) {
   SS_ASSERT(data != nullptr, "Failed to load image: {}", path.string());
   image.width = static_cast<uint32_t>(w);
   image.height = static_cast<uint32_t>(h);
-  image.buffer.assign(data, data + w * h * 3);
+  image.buffer.resize(static_cast<size_t>(w) * h * 3);
+  for (size_t i = 0; i < image.buffer.size(); ++i) {
+    image.buffer[i] = data[i] / 255.0f;
+  }
   stbi_image_free(data);
 }
 
+void tone_mapping(const Image& image, std::vector<uint8_t>& out) {
+  out.resize(image.buffer.size());
+
+  // Auto-exposure based on mean luminance
+  double sum = 0.0;
+  for (float v : image.buffer) sum += std::max(0.0f, v);
+  float mean = static_cast<float>(sum / std::max<size_t>(1, image.buffer.size()));
+  float gain = (mean > 1e-6f) ? (0.05f / mean) : 1.0f;
+
+  for (size_t i = 0; i < image.buffer.size(); ++i) {
+    float x = std::max(0.0f, image.buffer[i]) * gain;
+    float mapped = x / (1.0f + x);  // Reinhard tone mapping
+    float gamma = std::pow(mapped, 1.0f / 2.2f);
+    out[i] = static_cast<uint8_t>(std::clamp(gamma * 255.0f, 0.0f, 255.0f));
+  }
+}
+
 void save_image(const std::filesystem::path& path, const Image& image) {
+  std::vector<uint8_t> out;
+  tone_mapping(image, out);
   int ok = stbi_write_png(path.string().c_str(), image.width, image.height, 3,
-                          image.buffer.data(), image.width * 3);
+                          out.data(), image.width * 3);
   SS_ASSERT(ok != 0, "Failed to save image: {}", path.string());
 }
 

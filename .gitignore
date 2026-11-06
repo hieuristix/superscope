@@ -30,3 +30,6 @@ _deps/
 # Python stuff
 venv/
 .venv/
+
+# Outputs
+captures/

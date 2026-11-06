@@ -14,7 +14,7 @@
 struct Image {
   uint32_t width{0};
   uint32_t height{0};
-  std::vector<uint8_t> buffer{};
+  std::vector<float> buffer{};
 };
 
 struct Sample {
@@ -72,6 +72,8 @@ void capture(const glm::vec2& position,
              ImageRequest& request);
 
 void load_image(const std::filesystem::path& path, Image& image);
+
+void tone_mapping(const Image& image, std::vector<uint8_t>& out);
 
 void save_image(const std::filesystem::path& path, const Image& image);
 
