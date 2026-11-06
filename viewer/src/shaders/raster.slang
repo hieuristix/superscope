@@ -2,14 +2,10 @@
 
 module raster;
 import global_desc;
-
-struct DrawInfo {
-  column_major float3x3 transform;
-  float4 uvBounds; // left top right bottom
-  float3 color;
-  uint32_t texID;
-  uint32_t isMSDF;
-};
+import common;
+import capture;
+import sky;
+import orbit;
 
 struct PushConstants {
   DrawInfo* infoBuffer;
@@ -21,14 +17,6 @@ uniform PushConstants pc;
 struct VertexIn {
   uint32_t vertID : SV_VertexID;
   uint32_t instID : SV_InstanceID;
-};
-
-struct VertexOut {
-  uint32_t instID : SV_InstanceID;
-  float4 pos   : SV_Position;
-  float2 uv    : TEXCOORD0;
-  float2 uv1   : TEXCOORD1;
-  float3 color : TEXCOORD2;
 };
 
 static const float2 billboardCorners[3] = {
@@ -52,7 +40,7 @@ VertexOut main(VertexIn vi) {
   vo.instID = vi.instID;
   float3 screenPos = mul(info.transform, float3(pos, 1.0f));
   vo.pos = float4(screenPos.xy, 0.0f, 1.0f);
-  float2 normalized_uv = pos * 0.5f + 0.5f; // DO NOT CLAMP
+  float2 normalized_uv = pos * 0.5f + 0.5f;
   vo.uv = normalized_uv * (info.uvBounds.zw - info.uvBounds.xy) + info.uvBounds.xy;
   vo.uv1 = pos;
   vo.color = billboardColors[vi.vertID];
@@ -65,21 +53,18 @@ float4 main(VertexOut vo) : SV_Target {
     discard;
   }
 
-  float4 frag_out;
   DrawInfo info = pc.infoBuffer[vo.instID];
 
-  float4 texel = (info.texID == 0xFFFFFFFF)
-    ? float4(vo.color, 1.0f)
-    : sample2DLinear(info.texID, vo.uv);
-
-  if (info.isMSDF != 0) {
-    float signDist = median3(texel.r, texel.g, texel.b);
-    float w = fwidth(signDist);
-    float opacity = smoothstep(0.5 - w, 0.5 + w, signDist);
-    frag_out = float4(float3(1.0), opacity);
-  } else {
-    frag_out = texel;
+  // Top left: main_capture (instID 0)
+  // Bot left: main_sky     (instID 1)
+  // Right:    main_orbit   (instID 2)
+  if (vo.instID == 0) {
+    return main_capture(vo, info);
+  } else if (vo.instID == 1) {
+    return main_sky(vo, info);
+  } else if (vo.instID == 2) {
+    return main_orbit(vo, info);
   }
 
-  return frag_out;
+  return float4(vo.color, 1.0f);
 }

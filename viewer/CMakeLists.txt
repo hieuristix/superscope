@@ -18,14 +18,22 @@ if(SLANGC_EXECUTABLE)
   file(MAKE_DIRECTORY "${VIEWER_SHADER_DIR}")
   set(RASTER_SLANG "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/raster.slang")
   set(RASTER_SPV "${VIEWER_SHADER_DIR}/raster.spv")
+  set(SHADER_SOURCES
+    "${RASTER_SLANG}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/common.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/capture.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/sky.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/orbit.slang"
+  )
   add_custom_command(
     OUTPUT "${RASTER_SPV}"
     COMMAND ${SLANGC_EXECUTABLE}
       -I "${CMAKE_SOURCE_DIR}/ext/xev/xev/src/shaders"
+      -I "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
       "${RASTER_SLANG}"
       -target spirv
       -o "${RASTER_SPV}"
-    DEPENDS "${RASTER_SLANG}"
+    DEPENDS ${SHADER_SOURCES}
     COMMENT "Compiling viewer raster.slang to SPIR-V"
     VERBATIM
   )
