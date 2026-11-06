@@ -23,11 +23,11 @@ git submodule update --init --recursive
 We use justfile script to simply the compilation. To compile either `viewer` or
 `superscope`, you can run
 ```
-just com <target>
+just compile <target>
 ```
 where `<target>` can be replaced with `viewer` or `superscope`.
 
 Similarly, to run either the `viewer` or `superscope`, you can run:
 ```
-just com <target>
+just run <target>
 ```

@@ -7,10 +7,6 @@ import capture;
 import sky;
 import orbit;
 
-struct PushConstants {
-  DrawInfo* infoBuffer;
-};
-
 [[vk::push_constant]]
 uniform PushConstants pc;
 
@@ -53,17 +49,15 @@ float4 main(VertexOut vo) : SV_Target {
     discard;
   }
 
-  DrawInfo info = pc.infoBuffer[vo.instID];
-
   // Top left: main_capture (instID 0)
   // Bot left: main_sky     (instID 1)
   // Right:    main_orbit   (instID 2)
   if (vo.instID == 0) {
-    return main_capture(vo, info);
+    return main_capture(vo, pc);
   } else if (vo.instID == 1) {
-    return main_sky(vo, info);
+    return main_sky(vo, pc);
   } else if (vo.instID == 2) {
-    return main_orbit(vo, info);
+    return main_orbit(vo, pc);
   }
 
   return float4(vo.color, 1.0f);

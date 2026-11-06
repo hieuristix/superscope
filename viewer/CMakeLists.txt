@@ -4,8 +4,9 @@ project(viewer)
 file(GLOB_RECURSE SOURCE_FILES src/*.cpp)
 
 add_executable(viewer ${SOURCE_FILES})
-target_include_directories(viewer PRIVATE inc)
+target_include_directories(viewer PRIVATE inc ../ext/stb ../superscope/inc)
 target_link_libraries(viewer PRIVATE xev_core superscope_core)
+target_compile_definitions(viewer PRIVATE SS_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
 set(VIEWER_BIN_DIR "${CMAKE_BINARY_DIR}/viewer/bin")
 set(VIEWER_SHADER_DIR "${CMAKE_BINARY_DIR}/viewer/shaders")

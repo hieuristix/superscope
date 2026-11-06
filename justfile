@@ -9,7 +9,7 @@ viewer:
     cmake --build build --target viewer -j
 
 # Compile targets (e.g. `just com superscope` or `just com viewer`)
-com target:
+compile target:
     just {{target}}
 
 # Run targets (e.g. `just run superscope` or `just run viewer`)
