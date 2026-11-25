@@ -21,18 +21,20 @@ public float4 main_orbit(VertexOut vo, PushConstants pc) {
       ? sample2DLinear(pc.skyTexId, float2(skyU, skyV)).rgb * 0.45f
       : float3(0.02f, 0.02f, 0.04f);
 
+  float tNearest = 1e20f;
+  float tEarth = -1.0f;
   float3 finalColor = skyColor;
 
   // 1. Ray - Earth Sphere intersection (center at (0,0,0), radius = pc.earthRadius)
   float R = pc.earthRadius;
-  float b = dot(rayOrigin, rayDir);
-  float c = dot(rayOrigin, rayOrigin) - R * R;
-  float h = b * b - c;
-  float tEarth = -1.0f;
+  float bEarth = dot(rayOrigin, rayDir);
+  float cEarth = dot(rayOrigin, rayOrigin) - R * R;
+  float hEarth = bEarth * bEarth - cEarth;
 
-  if (h >= 0.0f) {
-    float t = -b - sqrt(h);
-    if (t > 0.0f) {
+  if (hEarth >= 0.0f) {
+    float t = -bEarth - sqrt(hEarth);
+    if (t > 0.0f && t < tNearest) {
+      tNearest = t;
       tEarth = t;
       float3 hitPos = rayOrigin + t * rayDir;
       float3 N = normalize(hitPos);
@@ -57,33 +59,92 @@ public float4 main_orbit(VertexOut vo, PushConstants pc) {
     }
   }
 
-  // 2. Draw Orbit Rings and Satellites
+  // 2. Draw Orbit Lines following a plane slice of the Earth
   if (pc.satelliteBuffer != nullptr && pc.numSatellites > 0) {
     for (uint32_t i = 0; i < pc.numSatellites; ++i) {
       Satellite sat = pc.satelliteBuffer[i];
+      float3 N = sat.planeNormal;
+      float R = sat.radius;
 
-      // Convert (theta, phi) spherical angles to 3D position
-      float cosPhi = cos(sat.phi);
-      float sinPhi = sin(sat.phi);
-      float cosTheta = cos(sat.theta);
-      float sinTheta = sin(sat.theta);
-      float3 satPos = sat.radius * float3(cosPhi * sinTheta, sinPhi, cosPhi * cosTheta);
+      // 1. Bounding sphere test: strictly reject any rays heading into the skybox
+      float R_bound = R + 0.15f;
+      float bBound = dot(rayOrigin, rayDir);
+      float cBound = dot(rayOrigin, rayOrigin) - R_bound * R_bound;
+      float disc = bBound * bBound - cBound;
+      if (disc < 0.0f) continue;
 
-      // Project ray to satellite point
-      float3 toSat = satPos - rayOrigin;
-      float tSat = dot(toSat, rayDir);
-      if (tSat > 0.0f) {
-        // Occlusion check against Earth
-        if (tEarth < 0.0f || tSat < tEarth) {
-          float3 closest = rayOrigin + tSat * rayDir;
-          float distToRay = length(satPos - closest);
+      float sqrtDisc = sqrt(disc);
+      float tEnter = max(0.0f, -bBound - sqrtDisc);
+      float tExit = -bBound + sqrtDisc;
+      if (tExit <= 0.0f) continue;
 
-          // Glowing satellite dot
-          float satCore = smoothstep(0.035f, 0.005f, distToRay);
-          float satGlow = smoothstep(0.12f, 0.01f, distToRay) * 0.4f;
+      float distPerp = 1e10f;
+      float tHit = 0.0f;
+      bool hitFound = false;
 
-          float3 satCol = float3(1.0f, 0.95f, 0.4f);
-          finalColor = lerp(finalColor, satCol, satCore + satGlow);
+      // 2. Plane intersection
+      float denom = dot(N, rayDir);
+      if (abs(denom) > 1e-4f) {
+        float tPlane = -dot(N, rayOrigin) / denom;
+        if (tPlane >= tEnter && tPlane <= tExit) {
+          float3 pPlane = rayOrigin + tPlane * rayDir;
+          float dPlane = length(pPlane);
+          float deltaR = abs(dPlane - R);
+          if (deltaR < 0.15f) {
+            float3 uRadial = (dPlane > 1e-5f) ? (pPlane / dPlane) : sat.u;
+            float3 T = cross(N, uRadial);
+            float dDotT = dot(rayDir, T);
+            float sinTheta = sqrt(max(0.01f, 1.0f - dDotT * dDotT));
+            distPerp = deltaR * (abs(denom) / sinTheta);
+            tHit = tPlane;
+            hitFound = true;
+          }
+        }
+      }
+
+      // 3. Edge-on fallback when ray traverses bounding sphere near the plane
+      if (!hitFound) {
+        float t0 = clamp(-bBound, tEnter, tExit);
+        float3 p0 = rayOrigin + t0 * rayDir;
+        float h = dot(N, p0);
+        float3 pPlane = p0 - h * N;
+        float dPlane = length(pPlane);
+        float deltaR = dPlane - R;
+        distPerp = sqrt(h * h + deltaR * deltaR);
+        tHit = t0;
+        hitFound = true;
+      }
+
+      // 4. Earth occlusion and anti-aliased drawing
+      if (hitFound && (tEarth < 0.0f || tHit < tEarth)) {
+        // Line thickness: has solid 3D width close-up, scales with distance for anti-aliasing up to a max value
+        float rTube = clamp(0.0035f * tHit, 0.008f, 0.018f);
+        if (distPerp < rTube) {
+          float alpha = smoothstep(rTube, rTube * 0.08f, distPerp) * 0.95f;
+          finalColor = lerp(finalColor, sat.color, alpha);
+        }
+      }
+    }
+  }
+
+  // 3. Ray - Satellite Sphere intersections (using precomputed satellite position)
+  if (pc.satelliteBuffer != nullptr && pc.numSatellites > 0) {
+    for (uint32_t i = 0; i < pc.numSatellites; ++i) {
+      Satellite sat = pc.satelliteBuffer[i];
+      float3 satPos = sat.pos;
+
+      // Ray - Sphere intersection
+      float3 oc = rayOrigin - satPos;
+      float rSat = (sat.sphereRadius > 0.0f) ? sat.sphereRadius : 0.025f;
+      float bSat = dot(oc, rayDir);
+      float cSat = dot(oc, oc) - rSat * rSat;
+      float dSat = bSat * bSat - cSat;
+
+      if (dSat >= 0.0f) {
+        float t = -bSat - sqrt(dSat);
+        if (t > 0.0f && t < tNearest) {
+          tNearest = t;
+          finalColor = sat.color; // UNSHADED solid color, no glow
         }
       }
     }

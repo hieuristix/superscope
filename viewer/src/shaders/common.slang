@@ -7,6 +7,16 @@ public struct Satellite {
   public float phi;
   public float radius;
   public float speed;
+  public float3 color;
+  public float sphereRadius;
+  public float3 pos;
+  public float _pad0;
+  public float3 planeNormal;
+  public float _pad1;
+  public float3 u;
+  public float _pad2;
+  public float3 v;
+  public float _pad3;
 };
 
 public struct DrawInfo {
@@ -39,5 +49,5 @@ public struct PushConstants {
   public float fov;
   public float aspect;
   public float earthRadius;
-  public float _pad;
+  public float skyAspect;
 };
