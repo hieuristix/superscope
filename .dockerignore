@@ -1,0 +1,8 @@
+build/
+build-linux/
+.git/
+assets/
+captures/
+ext/xev/
+viewer/
+.DS_Store
