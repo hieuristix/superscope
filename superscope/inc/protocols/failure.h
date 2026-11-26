@@ -1,6 +1,12 @@
 #pragma once
 #include "network/types.h"
+#include "network/socket.h"
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace ss {
@@ -40,6 +46,25 @@ private:
 
     // current set of monitored peers
     std::vector<NodeInfo> m_peers;
+
+    struct PeerState {
+        std::chrono::steady_clock::time_point last_seen;
+        bool alive{true};
+    };
+
+    // guards the peer list and heartbeat timestamps shared with the worker
+    mutable std::mutex m_mtx;
+    std::unordered_map<NodeId, PeerState> m_peer_states;
+
+    // UDP socket bound to the local heartbeat endpoint
+    Socket m_socket;
+
+    // controls the heartbeat sender/receiver loop
+    std::atomic<bool> m_running{false};
+    std::thread m_thread;
+
+    // send heartbeats and detect missed peers
+    void run();
 };
 
 } // namespace ss
