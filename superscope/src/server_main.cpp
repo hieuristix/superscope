@@ -1,13 +1,13 @@
 #include "server.h"
+#include "logger.h"
 #include "network/socket.h"
-#include "network/topology.h"
-#include <iostream>
 #include <limits>
 #include <random>
 #include <thread>
 
 int main(int argc, char* argv[]) {
     using namespace ss;
+    ss_init_logger();
 
     std::mt19937 rng{std::random_device{}()};
     std::uniform_int_distribution<uint32_t> id_dist(1, std::numeric_limits<uint32_t>::max());
@@ -40,17 +40,11 @@ int main(int argc, char* argv[]) {
     Endpoint hb  = {.ip = ip, .port = hb_port};
     CameraFOV fov = {.h_deg = 60, .v_deg = 45, .w = 320, .h = 240};
 
-    auto topo = std::make_unique<RingTopology>(id);
-    NodeInfo self = {.id = id, .tcp = tcp, .hb = hb};
-    topo->add_member(self);
-
-    ServerNode node(id, tcp, hb, fov, orbit, std::move(topo), kDiscoveryPort);
+    ServerNode node(id, tcp, hb, fov, orbit, kDiscoveryPort);
     node.start();
 
-    std::cout << "server " << id << " running at " << ip << ":" << tcp_port
-              << " (alt=" << orbit.altitude_km
-              << " inc=" << orbit.inclination_deg
-              << " anom=" << orbit.anomaly_deg << ")\n" << std::flush;
+    SS_SERVER_INFO(id, "running at {}:{} (alt={:.1f} inc={:.1f} anom={:.1f})",
+                   ip, tcp_port, orbit.altitude_km, orbit.inclination_deg, orbit.anomaly_deg);
     while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
     return 0;
 }

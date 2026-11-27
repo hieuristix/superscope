@@ -62,3 +62,5 @@ add_executable(test_capture_raycast src/main.cpp ${LIB_SOURCES})
 target_include_directories(test_capture_raycast PUBLIC inc ../ext/glm ../ext/stb ../ext/tinyexr)
 target_link_libraries(test_capture_raycast PUBLIC spdlog::spdlog Threads::Threads)
 target_compile_definitions(test_capture_raycast PRIVATE SS_RAYCAST SS_ROOT_DIR="${CMAKE_SOURCE_DIR}")
+
+add_subdirectory(tests)

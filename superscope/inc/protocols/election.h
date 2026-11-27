@@ -1,7 +1,9 @@
 #pragma once
+#include "network/topology.h"
 #include "network/types.h"
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 namespace ss {
@@ -20,8 +22,11 @@ struct Election {
     // start a new leader election round
     void start_election();
 
-    // handle an incoming protocol message from another node
-    void on_message(NodeId from, const std::vector<uint8_t>& payload);
+    // clear in-progress state so a stalled election can be restarted
+    void reset();
+
+    // handle an incoming lcr election message
+    void on_message_lcr(const std::vector<uint8_t>& payload);
 
     // update the protocol with the latest active swarm membership
     void on_membership_changed(const std::vector<NodeInfo>& members);
@@ -39,8 +44,11 @@ private:
     // callback invoked when a leader is chosen
     OnLeaderElected m_on_elected;
 
-    // latest known swarm members
-    std::vector<NodeInfo> m_members;
+    // ring overlay used to route election tokens clockwise
+    RingTopology m_ring;
+
+    // guards ring and election state shared by the server threads
+    mutable std::mutex m_mtx;
 
     // true while an election is underway
     bool m_in_progress{false};
