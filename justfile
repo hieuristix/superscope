@@ -21,10 +21,14 @@ launcher:
     cmake -B build
     cmake --build build --target server launcher -j
 
-# Build container image and Linux server/client binaries
-container:
+# Build container image (once) and Linux server/client binaries (incremental)
+image:
     container build -t superscope-dev .
+
+linux:
     container run --rm -v "{{justfile_directory()}}:/src" -w /src superscope-dev sh -c "cmake -B build-linux -DSS_NET_ONLY=ON && cmake --build build-linux --target server client -j"
+
+container: image linux
 
 # Compile/build targets (e.g. `just compile superscope`, `just build container`)
 compile target:
@@ -43,13 +47,13 @@ run_viewer: viewer
 run_client: client
     ./build/superscope/client
 
-run_launcher: launcher
+run_launcher: launcher linux
     ./build/superscope/launcher
 
-run_container name id:
+run_container name id: linux
     container run -d --name {{name}} -v "{{justfile_directory()}}:/src" superscope-dev /src/build-linux/superscope/server --id {{id}}
 
-run_container_client:
+run_container_client: linux
     container run -it --rm -v "{{justfile_directory()}}:/src" -w /src superscope-dev /src/build-linux/superscope/client
 
 run target *args:
@@ -67,3 +71,12 @@ kill_all_all: kill_all_server kill_all_client
 
 kill action target="all":
     just kill_{{action}}_{{target}}
+
+# Test targets (e.g. `just test election`)
+test_election:
+    cmake -B build
+    cmake --build build --target test_election -j
+    ./build/superscope/tests/test_election
+
+test target:
+    just test_{{target}}

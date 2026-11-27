@@ -63,8 +63,4 @@ target_include_directories(test_capture_raycast PUBLIC inc ../ext/glm ../ext/stb
 target_link_libraries(test_capture_raycast PUBLIC spdlog::spdlog Threads::Threads)
 target_compile_definitions(test_capture_raycast PRIVATE SS_RAYCAST SS_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
-add_executable(test_election tests/election.cpp)
-target_link_libraries(test_election PRIVATE superscope_core)
-
-add_executable(test_failure tests/failure.cpp)
-target_link_libraries(test_failure PRIVATE superscope_core)
+add_subdirectory(tests)

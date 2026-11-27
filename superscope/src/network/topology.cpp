@@ -22,7 +22,11 @@ void RingTopology::remove_member(NodeId id) {
 void RingTopology::set_members(const std::vector<NodeInfo>& members) {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_order.clear(); m_info.clear();
-    for (const auto& m : members) { m_info[m.id] = m; m_order.push_back(m.id); }
+    for (const auto& m : members) {
+        if (m_info.count(m.id)) continue;
+        m_info[m.id] = m;
+        m_order.push_back(m.id);
+    }
     std::sort(m_order.begin(), m_order.end());
 }
 

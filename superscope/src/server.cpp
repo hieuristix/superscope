@@ -1,18 +1,19 @@
 #include "server.h"
+#include "logger.h"
 #include "network/messages.h"
 #include "network/framing.h"
 #include "stitcher.h"
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
-#include <iostream>
 
 namespace ss {
 
-LeaderCtx::LeaderCtx(NodeId id, uint16_t cp, const std::string& mg, uint16_t mp, const ITopology* topo)
-    : m_id(id), m_mcast_group(mg), m_mcast_port(mp), m_topo(topo)
+LeaderCtx::LeaderCtx(NodeId id, uint16_t cp, const std::string& mg, uint16_t mp)
+    : m_id(id), m_mcast_group(mg), m_mcast_port(mp)
     , m_srv_sock(Socket::tcp_server(cp))
     , m_mcast_sock(Socket::mcast_sender(mg)) {}
 
@@ -28,6 +29,11 @@ void LeaderCtx::stop() {
     m_queue_cv.notify_all();
     m_srv_sock.close();
     if (m_accept_thr.joinable()) m_accept_thr.join();
+}
+
+void LeaderCtx::update_members(const std::vector<NodeId>& ids) {
+    std::lock_guard<std::mutex> lk(m_members_mtx);
+    m_member_ids = ids;
 }
 
 void LeaderCtx::issue_capture() {
@@ -113,7 +119,11 @@ void LeaderCtx::handle_client(int fd) {
     }
 
     if (h.type == MsgType::SwarmQuery) {
-        auto ids = m_topo ? m_topo->all_ids() : std::vector<NodeId>{m_id};
+        std::vector<NodeId> ids;
+        {
+            std::lock_guard<std::mutex> lk(m_members_mtx);
+            ids = m_member_ids.empty() ? std::vector<NodeId>{m_id} : m_member_ids;
+        }
         SwarmStatusPayload st = {
             .size = htonl((uint32_t)ids.size()),
         };
@@ -176,7 +186,7 @@ WorkerCtx::WorkerCtx(NodeId id, const CameraFOV& fov, const OrbitalCoords& orbit
     , m_tile_recv_port(trp)
     , m_sensor(fov)
     , m_hbq(1,
-        [this](SeqNum s){ std::cerr << "[worker " << m_id << "] NACK seq=" << s << "\n"; },
+        [this](SeqNum s){ SS_SERVER_WARN(m_id, "NACK seq={}", s); },
         [this](SeqNum s, const std::vector<uint8_t>& p){ on_capture(s, p); })
     , m_agg(id,
         [this](const Endpoint& dst, const Tile& t){ send_tile(dst, t); },
@@ -206,7 +216,15 @@ void WorkerCtx::update_topology(const std::vector<NodeInfo>& members, NodeId lea
 void WorkerCtx::mcast_loop() {
     uint8_t buf[2048];
     while (m_running) {
-        ssize_t n = recv(m_mcast_sock.fd(), buf, sizeof(buf), 0);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        int fd = m_mcast_sock.fd();
+        if (fd < 0) break;
+        FD_SET(fd, &rfds);
+        timeval tv{0, 500000};
+        if (select(fd + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
         if (n < (ssize_t)sizeof(PacketHeader)) continue;
         PacketHeader h{};
         if (!decode_header(buf, (size_t)n, h)) continue;
@@ -245,16 +263,18 @@ void WorkerCtx::send_tile(const Endpoint& dst, const Tile& t) {
         Socket c = Socket::tcp_client(dst.ip, dst.port);
         send_framed(c.fd(), encode_tile(t));
     } catch (const std::exception& e) {
-        std::cerr << "[worker " << m_id << "] send tile failed: " << e.what() << "\n";
+        SS_SERVER_ERROR(m_id, "send tile failed: {}", e.what());
     }
 }
 
 ServerNode::ServerNode(NodeId id, const Endpoint& tcp, const Endpoint& hb,
                        const CameraFOV& fov, const OrbitalCoords& orbit,
-                       std::unique_ptr<ITopology> topo, uint16_t disc_port)
+                       uint16_t disc_port)
     : m_id(id), m_tcp(tcp), m_hb(hb), m_fov(fov), m_orbit(orbit)
-    , m_topo(std::move(topo))
 {
+    NodeInfo self = {.id = m_id, .tcp = m_tcp, .hb = m_hb};
+    m_members[m_id] = self;
+
     m_disc = std::make_unique<Discovery>(m_id, m_tcp, m_hb, disc_port);
     m_fd   = std::make_unique<FailureDetector>(
         m_id, m_hb,
@@ -290,32 +310,75 @@ void ServerNode::stop() {
     if (m_fd)     m_fd->stop();
 }
 
+bool ServerNode::add_member(const NodeInfo& info) {
+    std::lock_guard<std::mutex> lk(m_members_mtx);
+    return m_members.emplace(info.id, info).second;
+}
+
+void ServerNode::remove_member(NodeId id) {
+    std::lock_guard<std::mutex> lk(m_members_mtx);
+    m_members.erase(id);
+}
+
+std::vector<NodeInfo> ServerNode::all_members() const {
+    std::lock_guard<std::mutex> lk(m_members_mtx);
+    std::vector<NodeInfo> out;
+    out.reserve(m_members.size());
+    for (const auto& [_, info] : m_members) out.push_back(info);
+    return out;
+}
+
+std::vector<NodeId> ServerNode::all_ids() const {
+    std::lock_guard<std::mutex> lk(m_members_mtx);
+    std::vector<NodeId> out;
+    out.reserve(m_members.size());
+    for (const auto& [id, _] : m_members) out.push_back(id);
+    return out;
+}
+
 void ServerNode::sync_protocols() {
-    auto members = m_topo->all_members();
+    auto members = all_members();
     if (m_elec)   m_elec->on_membership_changed(members);
     if (m_fd)     m_fd->update_peers(members);
+    if (m_leader) m_leader->update_members(all_ids());
     if (m_worker) m_worker->update_topology(members, m_leader_id.load());
 }
 
 void ServerNode::bootstrap_loop() {
     int disc_ticks = 0;
+    int elect_ticks = 0;
     int leader_ticks = 0;
     while (m_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (!m_running) break;
         NodeState st = m_state.load();
         if (st == NodeState::Discovering) {
+            elect_ticks = 0;
             if (++disc_ticks < 3) {
                 m_disc->broadcast_join();
             } else {
                 transition(NodeState::Electing);
                 m_elec->start_election();
             }
-        } else if (st == NodeState::Leader) {
-            if (++leader_ticks >= 4) {
-                leader_ticks = 0;
-                m_disc->broadcast_view(m_topo->all_members());
+        } else if (st == NodeState::Electing) {
+            if (++elect_ticks >= 4) {
+                elect_ticks = 0;
+                m_elec->reset();
+                m_elec->start_election();
             }
+        } else if (st == NodeState::Leader) {
+            elect_ticks = 0;
+            auto ids = all_ids();
+            if (!ids.empty() && ids.back() > m_id) {
+                transition(NodeState::Electing);
+                m_elec->reset();
+                m_elec->start_election();
+            } else if (++leader_ticks >= 4) {
+                leader_ticks = 0;
+                m_disc->broadcast_view(all_members());
+            }
+        } else {
+            elect_ticks = 0;
         }
     }
 }
@@ -327,49 +390,52 @@ void ServerNode::become_leader() {
     if (m_worker) { m_worker->stop(); m_worker.reset(); }
     transition(NodeState::Leader);
     uint16_t client_port = (m_tcp.ip == "127.0.0.1") ? (uint16_t)(kClientPort + m_id) : kClientPort;
-    m_leader = std::make_unique<LeaderCtx>(m_id, client_port, kMulticastGroup, kMulticastPort, m_topo.get());
+    m_leader = std::make_unique<LeaderCtx>(m_id, client_port, kMulticastGroup, kMulticastPort);
+    m_leader->update_members(all_ids());
     m_leader->start();
-    std::cout << "[server " << m_id << "] became LEADER (" << m_tcp.ip << ":" << client_port << ")\n" << std::flush;
+    SS_SERVER_INFO(m_id, "became LEADER ({}:{})", m_tcp.ip, client_port);
 }
 
 void ServerNode::become_worker(NodeId leader_id) {
     if (m_leader) { m_leader->stop(); m_leader.reset(); }
-    if (m_worker) { m_worker->stop(); m_worker.reset(); }
     transition(NodeState::Worker);
+    if (m_worker) {
+        m_worker->update_topology(all_members(), leader_id);
+        SS_SERVER_INFO(m_id, "stayed WORKER (leader={})", leader_id);
+        return;
+    }
     uint16_t tp = (m_tcp.ip == "127.0.0.1") ? (uint16_t)(kTilePortBase + m_id) : kTilePortBase;
     m_worker = std::make_unique<WorkerCtx>(m_id, m_fov, m_orbit, kMulticastGroup, kMulticastPort, tp);
-    m_worker->update_topology(m_topo->all_members(), leader_id);
+    m_worker->update_topology(all_members(), leader_id);
     m_worker->start();
-    std::cout << "[server " << m_id << "] became WORKER (" << m_tcp.ip << ")\n" << std::flush;
+    SS_SERVER_INFO(m_id, "became WORKER ({}, leader={})", m_tcp.ip, leader_id);
 }
 
 void ServerNode::on_joined(const NodeInfo& info, const Endpoint&) {
-    size_t before = m_topo->all_ids().size();
-    m_topo->add_member(info);
-    if (m_topo->all_ids().size() > before) {
+    if (add_member(info)) {
         sync_protocols();
-        m_disc->broadcast_view(m_topo->all_members());
+        m_disc->broadcast_view(all_members());
     } else if (m_state == NodeState::Leader) {
-        m_disc->broadcast_view(m_topo->all_members());
+        m_disc->broadcast_view(all_members());
     }
 }
 
 void ServerNode::on_view(const std::vector<NodeInfo>& members) {
-    size_t before = m_topo->all_ids().size();
-    for (const auto& m : members) m_topo->add_member(m);
-    if (m_topo->all_ids().size() > before) {
+    bool added = false;
+    for (const auto& m : members) added |= add_member(m);
+    if (added) {
         sync_protocols();
         if (m_state == NodeState::Leader)
-            m_disc->broadcast_view(m_topo->all_members());
+            m_disc->broadcast_view(all_members());
     }
-    if (m_state == NodeState::Discovering && m_topo->all_ids().size() > 1) {
+    if (m_state == NodeState::Discovering && all_ids().size() > 1) {
         transition(NodeState::Electing);
         m_elec->start_election();
     }
 }
 
 void ServerNode::on_fail(NodeId dead) {
-    m_topo->remove_member(dead);
+    remove_member(dead);
     sync_protocols();
     transition(NodeState::Electing);
     m_elec->start_election();
@@ -405,7 +471,7 @@ void ServerNode::elec_loop() {
             PacketHeader h{};
             if (decode_header(frm.data(), frm.size(), h) && h.type == MsgType::ElectionMsg) {
                 std::vector<uint8_t> payload(frm.begin() + sizeof(PacketHeader), frm.end());
-                m_elec->on_message(h.sender_id, payload);
+                m_elec->on_message_lcr(payload);
             }
         }
         ::close(pfd);

@@ -1,7 +1,6 @@
 #pragma once
 #include "network/types.h"
 #include "network/messages.h"
-#include "network/topology.h"
 #include "network/socket.h"
 #include "sensor.h"
 #include "protocols/discovery.h"
@@ -23,8 +22,7 @@ namespace ss {
 struct LeaderCtx {
     // bind client tcp server and multicast sender for the elected leader
     LeaderCtx(NodeId id, uint16_t client_port,
-              const std::string& mcast_group, uint16_t mcast_port,
-              const ITopology* topo);
+              const std::string& mcast_group, uint16_t mcast_port);
 
     // stop accepting clients and close sockets
     ~LeaderCtx();
@@ -34,6 +32,9 @@ struct LeaderCtx {
 
     // shut down client listener and wake any queued jobs
     void stop();
+
+    // update active swarm member ids for client swarm queries
+    void update_members(const std::vector<NodeId>& ids);
 
     // stamp and multicast a new capture command to all workers
     void issue_capture();
@@ -60,8 +61,11 @@ private:
     // multicast udp port for capture commands
     uint16_t m_mcast_port;
 
-    // read-only view of the swarm topology for swarm size queries
-    const ITopology* m_topo;
+    // latest snapshot of active member ids for swarm size queries
+    std::vector<NodeId> m_member_ids;
+
+    // guards concurrent access to m_member_ids
+    std::mutex m_members_mtx;
 
     // sequence number and logical clock generator
     Sequencer m_seq;
@@ -165,10 +169,10 @@ private:
 
 // top-level satellite node coordinating discovery, election, failure detection, and roles
 struct ServerNode {
-    // initialize node identity, topology, discovery, failure detector, and election
+    // initialize node identity, discovery, failure detector, and election
     ServerNode(NodeId id, const Endpoint& tcp, const Endpoint& hb,
                const CameraFOV& fov, const OrbitalCoords& orbit,
-               std::unique_ptr<ITopology> topo, uint16_t disc_port);
+               uint16_t disc_port);
 
     // stop all subsystems and join threads
     ~ServerNode();
@@ -204,6 +208,18 @@ private:
     // switch into leader or worker role once an election finishes
     void on_elected(NodeId leader);
 
+    // insert a member into m_members; return true if newly added
+    bool add_member(const NodeInfo& info);
+
+    // remove a member from m_members by id
+    void remove_member(NodeId id);
+
+    // return sorted snapshot of all known members
+    std::vector<NodeInfo> all_members() const;
+
+    // return sorted snapshot of all known member ids
+    std::vector<NodeId> all_ids() const;
+
     // notify election, failure detector, and worker of current membership
     void sync_protocols();
 
@@ -237,8 +253,11 @@ private:
     // id of the currently elected leader (0 if unknown)
     std::atomic<NodeId> m_leader_id{0};
 
-    // logical routing topology
-    std::unique_ptr<ITopology> m_topo;
+    // active swarm membership table keyed by node id
+    std::map<NodeId, NodeInfo> m_members;
+
+    // guards concurrent access to m_members
+    mutable std::mutex m_members_mtx;
 
     // udp discovery protocol handler
     std::unique_ptr<Discovery> m_disc;

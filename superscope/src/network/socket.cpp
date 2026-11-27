@@ -17,7 +17,13 @@ Socket& Socket::operator=(Socket&& o) noexcept {
     if (this != &o) { close(); m_fd = o.m_fd; o.m_fd = -1; }
     return *this;
 }
-void Socket::close() { if (m_fd >= 0) { ::close(m_fd); m_fd = -1; } }
+void Socket::close() {
+    if (m_fd >= 0) {
+        ::shutdown(m_fd, SHUT_RDWR);
+        ::close(m_fd);
+        m_fd = -1;
+    }
+}
 
 static void set_opt(int fd, int lvl, int opt, int val = 1) {
     setsockopt(fd, lvl, opt, &val, sizeof(val));
